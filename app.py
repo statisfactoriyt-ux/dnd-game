@@ -4,8 +4,9 @@ import os
 import re
 import random
 import ollama
+import io
+from gtts import gTTS
 from streamlit_server_state import server_state, server_state_lock
-from streamlit_tts import text_to_speech
 
 # === НАСТРОЙКА OLLAMA ===
 OLLAMA_HOST = "https://cedar-giveaway-pamphlet.ngrok-free.dev"
@@ -35,6 +36,18 @@ def ollama_chat_stream(messages, model=DEFAULT_MODEL):
         messages=messages,
         stream=True
     )
+
+
+def speak_text(text):
+    """Озвучивает текст через Google TTS (gTTS)"""
+    try:
+        tts = gTTS(text=text, lang="ru", slow=False)
+        audio_data = io.BytesIO()
+        tts.write_to_fp(audio_data)
+        audio_data.seek(0)
+        st.audio(audio_data, format="audio/mp3")
+    except Exception as e:
+        print(f"TTS Error: {e}")
 
 
 # === ГЛОБАЛЬНОЕ СОСТОЯНИЕ (МУЛЬТИПЛЕЕР) ===
@@ -692,7 +705,7 @@ if GAME["game_phase"] == "playing":
                 try:
                     clean_text = re.sub(r'<[^>]+>', '', full_response)
                     if len(clean_text) > 10:
-                        text_to_speech(text=clean_text, lang="ru")
+                        speak_text(clean_text)
                 except Exception as e:
                     print(f"TTS Error: {e}")
 
