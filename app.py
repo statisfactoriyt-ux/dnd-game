@@ -4,6 +4,7 @@ import os
 import re
 import random
 from openai import OpenAI
+from streamlit_server_state import server_state, server_state_lock
 
 # === ПОЛУЧЕНИЕ API КЛЮЧА ===
 try:
@@ -28,12 +29,13 @@ client = OpenAI(
     }
 )
 
-# === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (ДОСТУПНЫ ВСЕМ СЕССИЯМ) ===
-if "GAME_DATA" not in st.session_state:
-    st.session_state.GAME_DATA = {
-        "players": {},  # {имя: {данные}}
-        "online": set(),  # имена онлайн-игроков
-        "history": [{"role": "system", "content": """
+# === ГЛОБАЛЬНОЕ СОСТОЯНИЕ (ОБЩЕЕ ДЛЯ ВСЕХ СЕССИЙ) ===
+with server_state_lock["game_data"]:
+    if "game_data" not in server_state:
+        server_state.game_data = {
+            "players": {},  # {имя: {данные}}
+            "online": set(),  # имена онлайн-игроков
+            "history": [{"role": "system", "content": """
 Ты — Мастер подземелий (DM). Ты ведёшь игру на РУССКОМ языке.
 
 **СВЯЩЕННОЕ ПРАВИЛО (НЕ НАРУШАТЬ):**
@@ -58,13 +60,16 @@ if "GAME_DATA" not in st.session_state:
 - Кратко (2-3 абзаца).
 - Задавай вопрос: "Что вы делаете?"
 """}],
-        "round_number": 1,
-        "timer_start": None,
-        "timer_duration": 60,
-        "round_results": [],
-        "game_phase": "waiting",  # waiting → prologue → playing
-        "last_update": time.time()
-    }
+            "round_number": 1,
+            "timer_start": None,
+            "timer_duration": 60,
+            "round_results": [],
+            "game_phase": "waiting",  # waiting → prologue → playing
+            "last_update": time.time()
+        }
+
+# === АЛИАС ДЛЯ УДОБСТВА ===
+GAME = server_state.game_data
 
 
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
@@ -262,13 +267,6 @@ st.markdown("""
 if "player_name" not in st.session_state:
     st.session_state.player_name = None
 
-# === АВТОМАТИЧЕСКОЕ ОБНОВЛЕНИЕ (каждые 3 секунды) ===
-st.empty()
-time.sleep(0.1)
-
-# === ХРАНЕНИЕ ИМЕНИ ТЕКУЩЕГО ИГРОКА ===
-GAME = st.session_state.GAME_DATA
-
 # === ВЕРХНЯЯ ПАНЕЛЬ: ОНЛАЙН-СЧЁТЧИК ===
 col_title, col_online = st.columns([4, 1])
 with col_title:
@@ -287,8 +285,9 @@ if GAME["game_phase"] == "waiting":
 
     # Добавляем текущего игрока в онлайн (если он есть)
     if st.session_state.player_name:
-        if st.session_state.player_name not in GAME["online"]:
-            GAME["online"].add(st.session_state.player_name)
+        with server_state_lock["game_data"]:
+            if st.session_state.player_name not in GAME["online"]:
+                GAME["online"].add(st.session_state.player_name)
 
     # === ПОКАЗЫВАЕМ ОНЛАЙН-ИГРОКОВ ===
     st.markdown("### 👥 Игроки онлайн")
@@ -320,23 +319,24 @@ if GAME["game_phase"] == "waiting":
 
         if st.button("➕ Добавить персонажа", type="primary"):
             if name and race and char_class and history:
-                if name not in GAME["players"]:
-                    GAME["players"][name] = {
-                        "action": "",
-                        "ready": False,
-                        "hp": 20,
-                        "max_hp": 20,
-                        "race": race,
-                        "class": char_class,
-                        "inventory": [],
-                        "level": 1,
-                        "exp": 0,
-                        "history": history
-                    }
-                    st.session_state.player_name = name
-                    st.rerun()
-                else:
-                    st.error("Имя уже занято!")
+                with server_state_lock["game_data"]:
+                    if name not in GAME["players"]:
+                        GAME["players"][name] = {
+                            "action": "",
+                            "ready": False,
+                            "hp": 20,
+                            "max_hp": 20,
+                            "race": race,
+                            "class": char_class,
+                            "inventory": [],
+                            "level": 1,
+                            "exp": 0,
+                            "history": history
+                        }
+                        st.session_state.player_name = name
+                        st.rerun()
+                    else:
+                        st.error("Имя уже занято!")
             else:
                 st.error("Заполните все поля!")
 
@@ -345,45 +345,53 @@ if GAME["game_phase"] == "waiting":
     # === КНОПКА "ГОТОВ" ===
     if st.session_state.player_name and st.session_state.player_name in GAME["players"]:
         current_name = st.session_state.player_name
-        is_ready = GAME["players"][current_name].get("ready", False)
+
+        # Проверяем готовность с блокировкой
+        with server_state_lock["game_data"]:
+            is_ready = GAME["players"][current_name].get("ready", False)
 
         if not is_ready:
             if st.button("✅ Я готов!", type="primary", use_container_width=True):
-                GAME["players"][current_name]["ready"] = True
+                with server_state_lock["game_data"]:
+                    GAME["players"][current_name]["ready"] = True
                 st.rerun()
         else:
             st.success("✅ Вы готовы! Ожидаем остальных...")
             if st.button("❌ Отменить готовность"):
-                GAME["players"][current_name]["ready"] = False
+                with server_state_lock["game_data"]:
+                    GAME["players"][current_name]["ready"] = False
                 st.rerun()
 
         # Проверяем, все ли онлайн-игроки готовы
-        online_players = GAME["online"]
-        all_ready = all(
-            name in GAME["players"] and GAME["players"][name].get("ready", False)
-            for name in online_players
-        )
+        with server_state_lock["game_data"]:
+            online_players = GAME["online"].copy()
+            all_ready = all(
+                name in GAME["players"] and GAME["players"][name].get("ready", False)
+                for name in online_players
+            )
 
         if online_players and all_ready and len(online_players) >= 1:
             st.success(f"🎉 Все {len(online_players)} игроков готовы!")
             if st.button("🚀 Начать игру!", type="primary", use_container_width=True):
                 with st.spinner("🎲 Генерация мира..."):
-                    # Генерируем инвентарь
-                    for name, data in GAME["players"].items():
-                        if name in online_players and not data["inventory"]:
-                            data["inventory"] = generate_starting_inventory(
-                                data.get("history", ""),
-                                data.get("race", ""),
-                                data.get("class", "")
-                            )
+                    with server_state_lock["game_data"]:
+                        # Генерируем инвентарь
+                        for name, data in GAME["players"].items():
+                            if name in online_players and not data["inventory"]:
+                                data["inventory"] = generate_starting_inventory(
+                                    data.get("history", ""),
+                                    data.get("race", ""),
+                                    data.get("class", "")
+                                )
 
-                    # Генерируем пролог
-                    players_info = []
-                    for name, data in GAME["players"].items():
-                        if name in online_players:
-                            players_info.append(f"{name} ({data['race']}, {data['class']}): {data.get('history', '')}")
+                        # Генерируем пролог
+                        players_info = []
+                        for name, data in GAME["players"].items():
+                            if name in online_players:
+                                players_info.append(
+                                    f"{name} ({data['race']}, {data['class']}): {data.get('history', '')}")
 
-                    system_prompt = GAME["history"][0]["content"]
+                        system_prompt = GAME["history"][0]["content"]
 
                     try:
                         prologue_response = client.chat.completions.create(
@@ -405,20 +413,25 @@ if GAME["game_phase"] == "waiting":
                             ]
                         )
                         prologue_text = prologue_response.choices[0].message.content
-                        GAME["round_results"].append(f"📜 **Пролог**\n\n{prologue_text}")
-                        GAME["history"].append({"role": "assistant", "content": prologue_text})
+
+                        with server_state_lock["game_data"]:
+                            GAME["round_results"].append(f"📜 **Пролог**\n\n{prologue_text}")
+                            GAME["history"].append({"role": "assistant", "content": prologue_text})
+
+                            # Сбрасываем готовность
+                            for name in online_players:
+                                if name in GAME["players"]:
+                                    GAME["players"][name]["ready"] = False
+
+                            GAME["game_phase"] = "playing"
                     except Exception as e:
                         st.error(f"Ошибка генерации пролога: {e}")
-                        GAME["round_results"].append(
-                            "📜 **Пролог**\n\nВы стоите на перекрёстке судеб. Каждый из вас пришёл сюда со своей историей. Впереди вас ждёт неизведанный мир. Что вы делаете?"
-                        )
+                        with server_state_lock["game_data"]:
+                            GAME["round_results"].append(
+                                "📜 **Пролог**\n\nВы стоите на перекрёстке судеб. Каждый из вас пришёл сюда со своей историей. Впереди вас ждёт неизведанный мир. Что вы делаете?"
+                            )
+                            GAME["game_phase"] = "playing"
 
-                    # Сбрасываем готовность
-                    for name in online_players:
-                        if name in GAME["players"]:
-                            GAME["players"][name]["ready"] = False
-
-                    GAME["game_phase"] = "playing"
                     st.rerun()
 
     # Автообновление каждые 3 секунды
@@ -443,7 +456,8 @@ with st.sidebar:
     current_name = st.session_state.player_name
 
     if current_name and current_name in players:
-        player_data = players[current_name]
+        with server_state_lock["game_data"]:
+            player_data = players[current_name]
 
         st.markdown("### 👤 Мой персонаж")
         st.markdown(f"**{current_name}**")
@@ -475,13 +489,14 @@ with st.sidebar:
         st.caption(f"Раунд {GAME['round_number']}")
 
         if st.button("🔄 Новая игра (сброс)", type="secondary"):
-            GAME["players"] = {}
-            GAME["online"] = set()
-            GAME["round_number"] = 1
-            GAME["round_results"] = []
-            GAME["history"] = [GAME["history"][0]]
-            GAME["game_phase"] = "waiting"
-            GAME["timer_start"] = None
+            with server_state_lock["game_data"]:
+                GAME["players"] = {}
+                GAME["online"] = set()
+                GAME["round_number"] = 1
+                GAME["round_results"] = []
+                GAME["history"] = [GAME["history"][0]]
+                GAME["game_phase"] = "waiting"
+                GAME["timer_start"] = None
             st.session_state.player_name = None
             st.rerun()
 
@@ -500,9 +515,10 @@ with st.sidebar:
             """, unsafe_allow_html=True)
 
     if st.button("⚔️ Завершить раунд (админ)"):
-        for name in players:
-            if not players[name]["ready"]:
-                players[name]["ready"] = True
+        with server_state_lock["game_data"]:
+            for name in players:
+                if not players[name]["ready"]:
+                    players[name]["ready"] = True
         st.rerun()
 
 # === ОТОБРАЖЕНИЕ ИСТОРИИ ===
@@ -521,7 +537,8 @@ if GAME["game_phase"] == "playing":
     if st.session_state.player_name not in players:
         st.session_state.player_name = list(players.keys())[0]
 
-    current_player = players[st.session_state.player_name]
+    with server_state_lock["game_data"]:
+        current_player = players[st.session_state.player_name]
 
     if current_player["ready"]:
         st.info("✅ Вы уже отправили действие. Ждём остальных...")
@@ -536,22 +553,25 @@ if GAME["game_phase"] == "playing":
 
         if st.button("📤 Отправить действие", type="primary"):
             if action.strip():
-                current_player["action"] = action
-                current_player["ready"] = True
-                GAME["timer_start"] = None
+                with server_state_lock["game_data"]:
+                    current_player["action"] = action
+                    current_player["ready"] = True
+                    GAME["timer_start"] = None
                 st.rerun()
             else:
                 st.error("Напишите действие!")
 
-        ready_count = sum(1 for p in players.values() if p["ready"])
-        total = len(players)
+        with server_state_lock["game_data"]:
+            ready_count = sum(1 for p in players.values() if p["ready"])
+            total = len(players)
 
         if ready_count >= total * 0.5 and ready_count < total:
-            if GAME["timer_start"] is None:
-                GAME["timer_start"] = time.time()
+            with server_state_lock["game_data"]:
+                if GAME["timer_start"] is None:
+                    GAME["timer_start"] = time.time()
 
-            elapsed = time.time() - GAME["timer_start"]
-            remaining = max(0, GAME["timer_duration"] - elapsed)
+                elapsed = time.time() - GAME["timer_start"]
+                remaining = max(0, GAME["timer_duration"] - elapsed)
 
             color = "green" if remaining > 20 else "orange" if remaining > 10 else "red"
 
@@ -568,33 +588,36 @@ if GAME["game_phase"] == "playing":
             """, unsafe_allow_html=True)
 
             if remaining <= 0:
-                if not current_player["ready"]:
-                    if current_player["action"].strip():
-                        current_player["ready"] = True
-                    else:
-                        current_player["action"] = "пропускает ход (замешкался)"
-                        current_player["ready"] = True
-                    GAME["timer_start"] = None
-                    st.rerun()
+                with server_state_lock["game_data"]:
+                    if not current_player["ready"]:
+                        if current_player["action"].strip():
+                            current_player["ready"] = True
+                        else:
+                            current_player["action"] = "пропускает ход (замешкался)"
+                            current_player["ready"] = True
+                        GAME["timer_start"] = None
+                st.rerun()
 
-    all_ready = all(p["ready"] for p in players.values())
-    has_actions = any(p["action"].strip() for p in players.values())
+    with server_state_lock["game_data"]:
+        all_ready = all(p["ready"] for p in players.values())
+        has_actions = any(p["action"].strip() for p in players.values())
 
     if all_ready and has_actions:
         with st.spinner("🎲 Мастер обдумывает события..."):
-            actions_list = []
-            for name, data in players.items():
-                if data["action"].strip() and not data["action"] == "пропускает ход (замешкался)":
-                    actions_list.append(f"{name}: {data['action']}")
-                elif data["action"] == "пропускает ход (замешкался)":
-                    actions_list.append(f"{name}: замешкался и пропустил ход")
+            with server_state_lock["game_data"]:
+                actions_list = []
+                for name, data in players.items():
+                    if data["action"].strip() and not data["action"] == "пропускает ход (замешкался)":
+                        actions_list.append(f"{name}: {data['action']}")
+                    elif data["action"] == "пропускает ход (замешкался)":
+                        actions_list.append(f"{name}: замешкался и пропустил ход")
 
-            actions_text = "\n".join(actions_list) if actions_list else "Все игроки замешкались."
+                actions_text = "\n".join(actions_list) if actions_list else "Все игроки замешкались."
 
-            players_info = []
-            for name, data in players.items():
-                players_info.append(
-                    f"{name} (здоровье: {data['hp']}/{data['max_hp']}, инвентарь: {', '.join(data.get('inventory', []))})")
+                players_info = []
+                for name, data in players.items():
+                    players_info.append(
+                        f"{name} (здоровье: {data['hp']}/{data['max_hp']}, инвентарь: {', '.join(data.get('inventory', []))})")
 
             prompt = f"""
 ПОМНИ: ты НЕ изменяешь историю персонажа. Ты продолжаешь её.
@@ -653,35 +676,40 @@ if GAME["game_phase"] == "playing":
                         """
                     full_response = dice_html + "\n\n" + full_response
 
-                for name in players:
-                    pattern = rf"{name}: здоровье = (\d+)"
-                    match = re.search(pattern, full_response, re.IGNORECASE)
-                    if match:
-                        new_hp = int(match.group(1))
-                        players[name]["hp"] = max(0, min(new_hp, players[name]["max_hp"]))
+                # Парсим HP
+                with server_state_lock["game_data"]:
+                    for name in players:
+                        pattern = rf"{name}: здоровье = (\d+)"
+                        match = re.search(pattern, full_response, re.IGNORECASE)
+                        if match:
+                            new_hp = int(match.group(1))
+                            players[name]["hp"] = max(0, min(new_hp, players[name]["max_hp"]))
 
-                added_items = parse_inventory_from_response(full_response, players)
-                for name, items in added_items.items():
-                    if name in players:
-                        for item in items:
-                            if item not in players[name]["inventory"]:
-                                players[name]["inventory"].append(item)
-                                st.success(f"📦 {name} получил: {item}")
+                    # Парсим инвентарь
+                    added_items = parse_inventory_from_response(full_response, players)
+                    for name, items in added_items.items():
+                        if name in players:
+                            for item in items:
+                                if item not in players[name]["inventory"]:
+                                    players[name]["inventory"].append(item)
+                                    st.success(f"📦 {name} получил: {item}")
 
                 response_placeholder.markdown(f"🎯 **Раунд {GAME['round_number']}**\n\n{full_response}")
                 status_placeholder.empty()
 
                 clean_response = re.sub(r'<[^>]+>', '', full_response)
-                GAME["round_results"].append(
-                    f"🎯 **Раунд {GAME['round_number']}**\n\n{clean_response}"
-                )
-                GAME["history"].append({"role": "assistant", "content": clean_response})
 
-                for name in players:
-                    players[name]["action"] = ""
-                    players[name]["ready"] = False
-                GAME["round_number"] += 1
-                GAME["timer_start"] = None
+                with server_state_lock["game_data"]:
+                    GAME["round_results"].append(
+                        f"🎯 **Раунд {GAME['round_number']}**\n\n{clean_response}"
+                    )
+                    GAME["history"].append({"role": "assistant", "content": clean_response})
+
+                    for name in players:
+                        players[name]["action"] = ""
+                        players[name]["ready"] = False
+                    GAME["round_number"] += 1
+                    GAME["timer_start"] = None
 
                 st.rerun()
 
@@ -689,8 +717,9 @@ if GAME["game_phase"] == "playing":
                 st.error(f"Ошибка при обращении к ИИ: {e}")
 
     if not all_ready:
-        ready_count = sum(1 for p in players.values() if p["ready"])
-        total = len(players)
+        with server_state_lock["game_data"]:
+            ready_count = sum(1 for p in players.values() if p["ready"])
+            total = len(players)
 
         if ready_count >= total * 0.5 and ready_count < total:
             pass
@@ -699,6 +728,6 @@ if GAME["game_phase"] == "playing":
         else:
             st.info("📝 Напишите ваше действие в поле выше.")
 
-    # Автообновление каждые 3 секунды (чтобы видеть изменения)
+    # Автообновление каждые 3 секунды
     time.sleep(3)
     st.rerun()
