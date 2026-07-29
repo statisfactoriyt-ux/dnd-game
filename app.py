@@ -3,18 +3,40 @@ import time
 import os
 import re
 import random
-from openai import OpenAI
+import ollama
 from streamlit_server_state import server_state, server_state_lock
 
-# === ПОДКЛЮЧЕНИЕ К ТВОЕМУ OLLAMA ЧЕРЕЗ NGROK ===
-OLLAMA_URL = "https://cedar-giveaway-pamphlet.ngrok-free.dev/v1"
+# === НАСТРОЙКА OLLAMA ===
+# Если играешь локально: OLLAMA_HOST = "http://localhost:11434"
+# Если через ngrok: подставь свой адрес
+OLLAMA_HOST = "https://cedar-giveaway-pamphlet.ngrok-free.dev"
+DEFAULT_MODEL = "mistral:7b"
 
-CLIENT = OpenAI(
-    base_url=OLLAMA_URL,
-    api_key="ollama"  # Любая строка
-)
 
-DEFAULT_MODEL = "llama3.2:3b"  # Или другая модель
+def ollama_chat(messages, model=DEFAULT_MODEL, stream=False):
+    """Отправляет запрос к Ollama и возвращает ответ"""
+    try:
+        client = ollama.Client(host=OLLAMA_HOST)
+        response = client.chat(
+            model=model,
+            messages=messages,
+            stream=stream
+        )
+        return response
+    except Exception as e:
+        st.error(f"❌ Ошибка при обращении к Ollama: {e}")
+        return None
+
+
+def ollama_chat_stream(messages, model=DEFAULT_MODEL):
+    """Стриминг через Ollama"""
+    client = ollama.Client(host=OLLAMA_HOST)
+    return client.chat(
+        model=model,
+        messages=messages,
+        stream=True
+    )
+
 
 # === ГЛОБАЛЬНОЕ СОСТОЯНИЕ (МУЛЬТИПЛЕЕР) ===
 with server_state_lock["game_data"]:
@@ -58,7 +80,6 @@ with server_state_lock["game_data"]:
 GAME = server_state.game_data
 
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 def roll_dice(sides=20, description="🎲 Бросок"):
     result = random.randint(1, sides)
     dice_html = f"""
@@ -123,8 +144,7 @@ def parse_inventory_from_response(response_text, players):
 
 def generate_starting_inventory(history, race, char_class):
     try:
-        response = CLIENT.chat.completions.create(
-            model=DEFAULT_MODEL,
+        response = ollama_chat(
             messages=[
                 {"role": "system",
                  "content": "Ты — Мастер D&D. На основе истории, расы и класса персонажа, сгенерируй начальный инвентарь. Ответь ТОЛЬКО списком предметов через запятую. Максимум 5 предметов."},
@@ -137,9 +157,12 @@ def generate_starting_inventory(history, race, char_class):
 """}
             ]
         )
-        inventory_text = response.choices[0].message.content
-        items = [item.strip() for item in inventory_text.split(",") if item.strip()]
-        return items[:5]
+        if response:
+            inventory_text = response["message"]["content"]
+            items = [item.strip() for item in inventory_text.split(",") if item.strip()]
+            return items[:5]
+        else:
+            return ["рюкзак", "тетрадь", "ручка"]
     except Exception as e:
         print(f"Ошибка генерации инвентаря: {e}")
         return ["рюкзак", "тетрадь", "ручка"]
@@ -375,8 +398,7 @@ if GAME["game_phase"] == "waiting":
                         system_prompt = GAME["history"][0]["content"]
 
                     try:
-                        prologue_response = CLIENT.chat.completions.create(
-                            model=DEFAULT_MODEL,
+                        prologue_response = ollama_chat(
                             messages=[
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": f"""
@@ -393,7 +415,11 @@ if GAME["game_phase"] == "waiting":
 """}
                             ]
                         )
-                        prologue_text = prologue_response.choices[0].message.content
+
+                        if prologue_response:
+                            prologue_text = prologue_response["message"]["content"]
+                        else:
+                            prologue_text = "Вы стоите на перекрёстке судеб. Каждый из вас пришёл сюда со своей историей. Впереди вас ждёт неизведанный мир. Что вы делаете?"
 
                         with server_state_lock["game_data"]:
                             GAME["round_results"].append(f"📜 **Пролог**\n\n{prologue_text}")
@@ -623,15 +649,10 @@ if GAME["game_phase"] == "playing":
                 full_response = ""
 
                 # === СТРИМИНГ ЧЕРЕЗ OLLAMA ===
-                stream = CLIENT.chat.completions.create(
-                    model=DEFAULT_MODEL,
-                    messages=messages_for_ai,
-                    stream=True
-                )
-
+                stream = ollama_chat_stream(messages=messages_for_ai)
                 for chunk in stream:
-                    if chunk.choices[0].delta.content is not None:
-                        full_response += chunk.choices[0].delta.content
+                    if "message" in chunk and "content" in chunk["message"]:
+                        full_response += chunk["message"]["content"]
                         response_placeholder.markdown(f"🎯 **Раунд {GAME['round_number']}**\n\n{full_response}▌")
 
                 dice_results = parse_dice_rolls(full_response)
