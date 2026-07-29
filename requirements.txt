@@ -3,3 +3,4 @@ openai
 python-dotenv
 streamlit-server-state
 ollama
+streamlit-tts
