@@ -36,10 +36,7 @@ if not PROVIDERS:
     st.error("❌ API ключи не найдены! Добавьте их в Secrets (на Cloud) или в .env (локально).")
     st.stop()
 
-CLIENT = FreeFlowClient(
-    providers=PROVIDERS,
-    default_model="auto",
-    fallback_strategy="next"
+CLIENT = FreeFlowClient(providers=PROVIDERS
 )
 
 # === ГЛОБАЛЬНОЕ СОСТОЯНИЕ ===
