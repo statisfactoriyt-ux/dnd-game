@@ -6,23 +6,17 @@ import random
 from openai import OpenAI
 from streamlit_server_state import server_state, server_state_lock
 
-# === ПОЛУЧЕНИЕ API КЛЮЧА ===
-try:
-    OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
-except (FileNotFoundError, KeyError):
-    from dotenv import load_dotenv
+# === НАСТРОЙКА ПОДКЛЮЧЕНИЯ К OMNIRUTE ===
+# OmniRoute запускается локально на порту 20128
+OMNIRUTE_URL = "http://localhost:20128/v1"
 
-    load_dotenv()
-    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# OmniRoute принимает любой API-ключ, можно передать "any"
+OMNIRUTE_API_KEY = "any"
 
-if not OPENROUTER_API_KEY:
-    st.error("❌ API ключ не найден! Добавьте OPENROUTER_API_KEY в Secrets (на Cloud) или в .env (локально).")
-    st.stop()
-
-# === ПОДКЛЮЧЕНИЕ К OPENROUTER ===
+# === ПОДКЛЮЧЕНИЕ К OMNIRUTE ===
 client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
+    base_url=OMNIRUTE_URL,
+    api_key=OMNIRUTE_API_KEY,
     default_headers={
         "HTTP-Referer": "http://localhost:8501",
         "X-Title": "D&D Game"
@@ -33,8 +27,8 @@ client = OpenAI(
 with server_state_lock["game_data"]:
     if "game_data" not in server_state:
         server_state.game_data = {
-            "players": {},  # {имя: {данные}}
-            "online": set(),  # имена онлайн-игроков
+            "players": {},
+            "online": set(),
             "history": [{"role": "system", "content": """
 Ты — Мастер подземелий (DM). Ты ведёшь игру на РУССКОМ языке.
 
@@ -64,7 +58,7 @@ with server_state_lock["game_data"]:
             "timer_start": None,
             "timer_duration": 60,
             "round_results": [],
-            "game_phase": "waiting",  # waiting → prologue → playing
+            "game_phase": "waiting",
             "last_update": time.time()
         }
 
@@ -138,7 +132,7 @@ def parse_inventory_from_response(response_text, players):
 def generate_starting_inventory(history, race, char_class):
     try:
         response = client.chat.completions.create(
-            model="openrouter/free",
+            model="auto",  # OmniRoute автоматически выберет модель
             messages=[
                 {"role": "system",
                  "content": "Ты — Мастер D&D. На основе истории, расы и класса персонажа, сгенерируй начальный инвентарь. Ответь ТОЛЬКО списком предметов через запятую. Максимум 5 предметов."},
@@ -251,21 +245,18 @@ st.markdown("""
         50% { transform: scale(1.05); }
         100% { transform: scale(1); }
     }
-    .online-badge {
-        background-color: #00ff88;
-        color: #0e1117;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 14px;
-        font-weight: bold;
-        display: inline-block;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # === ИНИЦИАЛИЗАЦИЯ ДАННЫХ ИГРОКА ===
 if "player_name" not in st.session_state:
     st.session_state.player_name = None
+
+# === СБРОС ПРИ ПЕРЕЗАГРУЗКЕ ===
+if GAME["game_phase"] == "waiting":
+    if st.session_state.player_name:
+        if st.session_state.player_name not in GAME["players"]:
+            st.session_state.player_name = None
 
 # === ВЕРХНЯЯ ПАНЕЛЬ: ОНЛАЙН-СЧЁТЧИК ===
 col_title, col_online = st.columns([4, 1])
@@ -283,13 +274,11 @@ with col_online:
 if GAME["game_phase"] == "waiting":
     st.markdown("## 🎭 Ожидание игроков")
 
-    # Добавляем текущего игрока в онлайн (если он есть)
     if st.session_state.player_name:
         with server_state_lock["game_data"]:
             if st.session_state.player_name not in GAME["online"]:
                 GAME["online"].add(st.session_state.player_name)
 
-    # === ПОКАЗЫВАЕМ ОНЛАЙН-ИГРОКОВ ===
     st.markdown("### 👥 Игроки онлайн")
     if GAME["online"]:
         for name in GAME["online"]:
@@ -304,9 +293,17 @@ if GAME["game_phase"] == "waiting":
 
     st.markdown("---")
 
-    # === СОЗДАНИЕ ПЕРСОНАЖА ===
     if st.session_state.player_name and st.session_state.player_name in GAME["players"]:
         st.success(f"✅ Вы уже создали персонажа: **{st.session_state.player_name}**")
+
+        if st.button("🚪 Выйти из игры (удалить персонажа)", type="secondary"):
+            with server_state_lock["game_data"]:
+                if st.session_state.player_name in GAME["online"]:
+                    GAME["online"].remove(st.session_state.player_name)
+                if st.session_state.player_name in GAME["players"]:
+                    del GAME["players"][st.session_state.player_name]
+            st.session_state.player_name = None
+            st.rerun()
     else:
         st.markdown("### 📝 Создать персонажа")
         col1, col2 = st.columns(2)
@@ -342,11 +339,9 @@ if GAME["game_phase"] == "waiting":
 
     st.markdown("---")
 
-    # === КНОПКА "ГОТОВ" ===
     if st.session_state.player_name and st.session_state.player_name in GAME["players"]:
         current_name = st.session_state.player_name
 
-        # Проверяем готовность с блокировкой
         with server_state_lock["game_data"]:
             is_ready = GAME["players"][current_name].get("ready", False)
 
@@ -362,7 +357,6 @@ if GAME["game_phase"] == "waiting":
                     GAME["players"][current_name]["ready"] = False
                 st.rerun()
 
-        # Проверяем, все ли онлайн-игроки готовы
         with server_state_lock["game_data"]:
             online_players = GAME["online"].copy()
             all_ready = all(
@@ -375,7 +369,6 @@ if GAME["game_phase"] == "waiting":
             if st.button("🚀 Начать игру!", type="primary", use_container_width=True):
                 with st.spinner("🎲 Генерация мира..."):
                     with server_state_lock["game_data"]:
-                        # Генерируем инвентарь
                         for name, data in GAME["players"].items():
                             if name in online_players and not data["inventory"]:
                                 data["inventory"] = generate_starting_inventory(
@@ -384,7 +377,6 @@ if GAME["game_phase"] == "waiting":
                                     data.get("class", "")
                                 )
 
-                        # Генерируем пролог
                         players_info = []
                         for name, data in GAME["players"].items():
                             if name in online_players:
@@ -395,7 +387,7 @@ if GAME["game_phase"] == "waiting":
 
                     try:
                         prologue_response = client.chat.completions.create(
-                            model="openrouter/free",
+                            model="auto",
                             messages=[
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": f"""
@@ -418,7 +410,6 @@ if GAME["game_phase"] == "waiting":
                             GAME["round_results"].append(f"📜 **Пролог**\n\n{prologue_text}")
                             GAME["history"].append({"role": "assistant", "content": prologue_text})
 
-                            # Сбрасываем готовность
                             for name in online_players:
                                 if name in GAME["players"]:
                                     GAME["players"][name]["ready"] = False
@@ -434,7 +425,6 @@ if GAME["game_phase"] == "waiting":
 
                     st.rerun()
 
-    # Автообновление каждые 3 секунды
     time.sleep(3)
     st.rerun()
     st.stop()
@@ -442,11 +432,9 @@ if GAME["game_phase"] == "waiting":
 # === ИГРОВАЯ ФАЗА ===
 st.title(f"🎲 Раунд {GAME['round_number']}")
 
-# === ЛЕВАЯ ПАНЕЛЬ ===
 with st.sidebar:
     players = GAME["players"]
 
-    # Выбор текущего игрока
     if st.session_state.player_name not in players:
         if players:
             st.session_state.player_name = list(players.keys())[0]
@@ -500,7 +488,6 @@ with st.sidebar:
             st.session_state.player_name = None
             st.rerun()
 
-    # === СПИСОК ВСЕХ ИГРОКОВ ===
     st.markdown("### 👥 Все игроки")
     for name, data in players.items():
         if name != current_name:
@@ -521,12 +508,10 @@ with st.sidebar:
                     players[name]["ready"] = True
         st.rerun()
 
-# === ОТОБРАЖЕНИЕ ИСТОРИИ ===
 for msg in GAME["round_results"]:
     with st.chat_message("assistant"):
         st.markdown(msg)
 
-# === ИГРОВАЯ ЛОГИКА ===
 if GAME["game_phase"] == "playing":
     players = GAME["players"]
 
@@ -650,7 +635,7 @@ if GAME["game_phase"] == "playing":
                 full_response = ""
 
                 stream = client.chat.completions.create(
-                    model="openrouter/free",
+                    model="auto",
                     messages=messages_for_ai,
                     stream=True
                 )
@@ -676,7 +661,6 @@ if GAME["game_phase"] == "playing":
                         """
                     full_response = dice_html + "\n\n" + full_response
 
-                # Парсим HP
                 with server_state_lock["game_data"]:
                     for name in players:
                         pattern = rf"{name}: здоровье = (\d+)"
@@ -685,7 +669,6 @@ if GAME["game_phase"] == "playing":
                             new_hp = int(match.group(1))
                             players[name]["hp"] = max(0, min(new_hp, players[name]["max_hp"]))
 
-                    # Парсим инвентарь
                     added_items = parse_inventory_from_response(full_response, players)
                     for name, items in added_items.items():
                         if name in players:
@@ -728,6 +711,5 @@ if GAME["game_phase"] == "playing":
         else:
             st.info("📝 Напишите ваше действие в поле выше.")
 
-    # Автообновление каждые 3 секунды
     time.sleep(3)
     st.rerun()
