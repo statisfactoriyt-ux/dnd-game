@@ -3,27 +3,46 @@ import time
 import os
 import re
 import random
-from openai import OpenAI
+from freeflow_llm import FreeFlowClient
 from streamlit_server_state import server_state, server_state_lock
 
-# === НАСТРОЙКА ПОДКЛЮЧЕНИЯ К OMNIRUTE ===
-# OmniRoute запускается локально на порту 20128
-OMNIRUTE_URL = "http://localhost:20128/v1"
-
-# OmniRoute принимает любой API-ключ, можно передать "any"
-OMNIRUTE_API_KEY = "any"
-
-# === ПОДКЛЮЧЕНИЕ К OMNIRUTE ===
-client = OpenAI(
-    base_url=OMNIRUTE_URL,
-    api_key=OMNIRUTE_API_KEY,
-    default_headers={
-        "HTTP-Referer": "http://localhost:8501",
-        "X-Title": "D&D Game"
+# === НАСТРОЙКА FREE FLOW (ключи из st.secrets) ===
+try:
+    # Пытаемся получить ключи из Streamlit Secrets
+    PROVIDERS = {
+        "groq": {
+            "api_key": st.secrets["GROQ_API_KEY"]
+        },
+        "gemini": {
+            "api_key": st.secrets["GEMINI_API_KEY"]
+        },
+        "openrouter": {
+            "api_key": st.secrets["OPENROUTER_API_KEY"]
+        }
     }
+except (FileNotFoundError, KeyError):
+    # Если нет секретов — пробуем загрузить из .env (для локальной разработки)
+    from dotenv import load_dotenv
+    load_dotenv()
+    PROVIDERS = {}
+    if os.getenv("GROQ_API_KEY"):
+        PROVIDERS["groq"] = {"api_key": os.getenv("GROQ_API_KEY")}
+    if os.getenv("GEMINI_API_KEY"):
+        PROVIDERS["gemini"] = {"api_key": os.getenv("GEMINI_API_KEY")}
+    if os.getenv("OPENROUTER_API_KEY"):
+        PROVIDERS["openrouter"] = {"api_key": os.getenv("OPENROUTER_API_KEY")}
+
+if not PROVIDERS:
+    st.error("❌ API ключи не найдены! Добавьте их в Secrets (на Cloud) или в .env (локально).")
+    st.stop()
+
+CLIENT = FreeFlowClient(
+    providers=PROVIDERS,
+    default_model="auto",
+    fallback_strategy="next"
 )
 
-# === ГЛОБАЛЬНОЕ СОСТОЯНИЕ (ОБЩЕЕ ДЛЯ ВСЕХ СЕССИЙ) ===
+# === ГЛОБАЛЬНОЕ СОСТОЯНИЕ ===
 with server_state_lock["game_data"]:
     if "game_data" not in server_state:
         server_state.game_data = {
@@ -62,11 +81,9 @@ with server_state_lock["game_data"]:
             "last_update": time.time()
         }
 
-# === АЛИАС ДЛЯ УДОБСТВА ===
 GAME = server_state.game_data
 
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 def roll_dice(sides=20, description="🎲 Бросок"):
     result = random.randint(1, sides)
     dice_html = f"""
@@ -131,8 +148,8 @@ def parse_inventory_from_response(response_text, players):
 
 def generate_starting_inventory(history, race, char_class):
     try:
-        response = client.chat.completions.create(
-            model="auto",  # OmniRoute автоматически выберет модель
+        response = CLIENT.chat(
+            model="auto",
             messages=[
                 {"role": "system",
                  "content": "Ты — Мастер D&D. На основе истории, расы и класса персонажа, сгенерируй начальный инвентарь. Ответь ТОЛЬКО списком предметов через запятую. Максимум 5 предметов."},
@@ -145,7 +162,7 @@ def generate_starting_inventory(history, race, char_class):
 """}
             ]
         )
-        inventory_text = response.choices[0].message.content
+        inventory_text = response.content
         items = [item.strip() for item in inventory_text.split(",") if item.strip()]
         return items[:5]
     except Exception as e:
@@ -248,17 +265,15 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# === ИНИЦИАЛИЗАЦИЯ ДАННЫХ ИГРОКА ===
+# === ИНИЦИАЛИЗАЦИЯ ===
 if "player_name" not in st.session_state:
     st.session_state.player_name = None
 
-# === СБРОС ПРИ ПЕРЕЗАГРУЗКЕ ===
 if GAME["game_phase"] == "waiting":
     if st.session_state.player_name:
         if st.session_state.player_name not in GAME["players"]:
             st.session_state.player_name = None
 
-# === ВЕРХНЯЯ ПАНЕЛЬ: ОНЛАЙН-СЧЁТЧИК ===
 col_title, col_online = st.columns([4, 1])
 with col_title:
     st.title("🎲 D&D с ИИ")
@@ -270,7 +285,6 @@ with col_online:
     </div>
     """, unsafe_allow_html=True)
 
-# === ФАЗА 0: ОЖИДАНИЕ ИГРОКОВ ===
 if GAME["game_phase"] == "waiting":
     st.markdown("## 🎭 Ожидание игроков")
 
@@ -386,7 +400,7 @@ if GAME["game_phase"] == "waiting":
                         system_prompt = GAME["history"][0]["content"]
 
                     try:
-                        prologue_response = client.chat.completions.create(
+                        prologue_response = CLIENT.chat(
                             model="auto",
                             messages=[
                                 {"role": "system", "content": system_prompt},
@@ -404,7 +418,7 @@ if GAME["game_phase"] == "waiting":
 """}
                             ]
                         )
-                        prologue_text = prologue_response.choices[0].message.content
+                        prologue_text = prologue_response.content
 
                         with server_state_lock["game_data"]:
                             GAME["round_results"].append(f"📜 **Пролог**\n\n{prologue_text}")
@@ -429,7 +443,6 @@ if GAME["game_phase"] == "waiting":
     st.rerun()
     st.stop()
 
-# === ИГРОВАЯ ФАЗА ===
 st.title(f"🎲 Раунд {GAME['round_number']}")
 
 with st.sidebar:
@@ -634,15 +647,15 @@ if GAME["game_phase"] == "playing":
                 response_placeholder = st.empty()
                 full_response = ""
 
-                stream = client.chat.completions.create(
+                # === СТРИМИНГ ЧЕРЕЗ FREE FLOW ===
+                stream = CLIENT.chat_stream(
                     model="auto",
-                    messages=messages_for_ai,
-                    stream=True
+                    messages=messages_for_ai
                 )
 
                 for chunk in stream:
-                    if chunk.choices[0].delta.content is not None:
-                        full_response += chunk.choices[0].delta.content
+                    if chunk:
+                        full_response += chunk
                         response_placeholder.markdown(f"🎯 **Раунд {GAME['round_number']}**\n\n{full_response}▌")
 
                 dice_results = parse_dice_rolls(full_response)
