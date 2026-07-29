@@ -6,18 +6,15 @@ import random
 from openai import OpenAI
 from streamlit_server_state import server_state, server_state_lock
 
-# === ПОДКЛЮЧЕНИЕ К ТВОЕМУ OLLAMA ЧЕРЕЗ CLOUDFLARE ===
-# Если адрес изменится — поменяй здесь!
-OLLAMA_URL = "https://assignment-weapon-cigarettes-entitled.trycloudflare.com/v1"
+# === ПОДКЛЮЧЕНИЕ К ТВОЕМУ OLLAMA ЧЕРЕЗ NGROK ===
+OLLAMA_URL = "https://cedar-giveaway-pamphlet.ngrok-free.dev/v1"
 
 CLIENT = OpenAI(
     base_url=OLLAMA_URL,
-    api_key="ollama"  # Любая строка, Ollama не проверяет ключи
+    api_key="ollama"  # Любая строка
 )
 
-# Модель, которую ты скачал в Ollama
-# Проверь командой: ollama list
-DEFAULT_MODEL = "llama3.2:3b"  # или "llama3.3:70b", "mistral:7b"
+DEFAULT_MODEL = "llama3.2:3b"  # Или другая модель
 
 # === ГЛОБАЛЬНОЕ СОСТОЯНИЕ (МУЛЬТИПЛЕЕР) ===
 with server_state_lock["game_data"]:
