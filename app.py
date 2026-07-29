@@ -3,43 +3,23 @@ import time
 import os
 import re
 import random
-from freeflow_llm import FreeFlowClient
+from openai import OpenAI
 from streamlit_server_state import server_state, server_state_lock
 
-# === НАСТРОЙКА FREE FLOW (ключи из st.secrets) ===
-try:
-    # Пытаемся получить ключи из Streamlit Secrets
-    PROVIDERS = {
-        "groq": {
-            "api_key": st.secrets["GROQ_API_KEY"]
-        },
-        "gemini": {
-            "api_key": st.secrets["GEMINI_API_KEY"]
-        },
-        "openrouter": {
-            "api_key": st.secrets["OPENROUTER_API_KEY"]
-        }
-    }
-except (FileNotFoundError, KeyError):
-    # Если нет секретов — пробуем загрузить из .env (для локальной разработки)
-    from dotenv import load_dotenv
-    load_dotenv()
-    PROVIDERS = {}
-    if os.getenv("GROQ_API_KEY"):
-        PROVIDERS["groq"] = {"api_key": os.getenv("GROQ_API_KEY")}
-    if os.getenv("GEMINI_API_KEY"):
-        PROVIDERS["gemini"] = {"api_key": os.getenv("GEMINI_API_KEY")}
-    if os.getenv("OPENROUTER_API_KEY"):
-        PROVIDERS["openrouter"] = {"api_key": os.getenv("OPENROUTER_API_KEY")}
+# === ПОДКЛЮЧЕНИЕ К ТВОЕМУ OLLAMA ЧЕРЕЗ CLOUDFLARE ===
+# Если адрес изменится — поменяй здесь!
+OLLAMA_URL = "https://assignment-weapon-cigarettes-entitled.trycloudflare.com/v1"
 
-if not PROVIDERS:
-    st.error("❌ API ключи не найдены! Добавьте их в Secrets (на Cloud) или в .env (локально).")
-    st.stop()
-
-CLIENT = FreeFlowClient(providers=PROVIDERS
+CLIENT = OpenAI(
+    base_url=OLLAMA_URL,
+    api_key="ollama"  # Любая строка, Ollama не проверяет ключи
 )
 
-# === ГЛОБАЛЬНОЕ СОСТОЯНИЕ ===
+# Модель, которую ты скачал в Ollama
+# Проверь командой: ollama list
+DEFAULT_MODEL = "llama3.2:3b"  # или "llama3.3:70b", "mistral:7b"
+
+# === ГЛОБАЛЬНОЕ СОСТОЯНИЕ (МУЛЬТИПЛЕЕР) ===
 with server_state_lock["game_data"]:
     if "game_data" not in server_state:
         server_state.game_data = {
@@ -81,6 +61,7 @@ with server_state_lock["game_data"]:
 GAME = server_state.game_data
 
 
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 def roll_dice(sides=20, description="🎲 Бросок"):
     result = random.randint(1, sides)
     dice_html = f"""
@@ -145,8 +126,8 @@ def parse_inventory_from_response(response_text, players):
 
 def generate_starting_inventory(history, race, char_class):
     try:
-        response = CLIENT.chat(
-            model="auto",
+        response = CLIENT.chat.completions.create(
+            model=DEFAULT_MODEL,
             messages=[
                 {"role": "system",
                  "content": "Ты — Мастер D&D. На основе истории, расы и класса персонажа, сгенерируй начальный инвентарь. Ответь ТОЛЬКО списком предметов через запятую. Максимум 5 предметов."},
@@ -159,7 +140,7 @@ def generate_starting_inventory(history, race, char_class):
 """}
             ]
         )
-        inventory_text = response.content
+        inventory_text = response.choices[0].message.content
         items = [item.strip() for item in inventory_text.split(",") if item.strip()]
         return items[:5]
     except Exception as e:
@@ -397,8 +378,8 @@ if GAME["game_phase"] == "waiting":
                         system_prompt = GAME["history"][0]["content"]
 
                     try:
-                        prologue_response = CLIENT.chat(
-                            model="auto",
+                        prologue_response = CLIENT.chat.completions.create(
+                            model=DEFAULT_MODEL,
                             messages=[
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": f"""
@@ -415,7 +396,7 @@ if GAME["game_phase"] == "waiting":
 """}
                             ]
                         )
-                        prologue_text = prologue_response.content
+                        prologue_text = prologue_response.choices[0].message.content
 
                         with server_state_lock["game_data"]:
                             GAME["round_results"].append(f"📜 **Пролог**\n\n{prologue_text}")
@@ -644,15 +625,16 @@ if GAME["game_phase"] == "playing":
                 response_placeholder = st.empty()
                 full_response = ""
 
-                # === СТРИМИНГ ЧЕРЕЗ FREE FLOW ===
-                stream = CLIENT.chat_stream(
-                    model="auto",
-                    messages=messages_for_ai
+                # === СТРИМИНГ ЧЕРЕЗ OLLAMA ===
+                stream = CLIENT.chat.completions.create(
+                    model=DEFAULT_MODEL,
+                    messages=messages_for_ai,
+                    stream=True
                 )
 
                 for chunk in stream:
-                    if chunk:
-                        full_response += chunk
+                    if chunk.choices[0].delta.content is not None:
+                        full_response += chunk.choices[0].delta.content
                         response_placeholder.markdown(f"🎯 **Раунд {GAME['round_number']}**\n\n{full_response}▌")
 
                 dice_results = parse_dice_rolls(full_response)
