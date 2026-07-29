@@ -5,12 +5,10 @@ import re
 import random
 from openai import OpenAI
 
-# === ПОЛУЧЕНИЕ API КЛЮЧА (для Cloud + локально) ===
+# === ПОЛУЧЕНИЕ API КЛЮЧА ===
 try:
-    # Пытаемся получить ключ из секретов Streamlit Cloud
     OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
 except (FileNotFoundError, KeyError):
-    # Если не получилось — пробуем загрузить из .env (для локальной разработки)
     from dotenv import load_dotenv
 
     load_dotenv()
@@ -33,7 +31,6 @@ client = OpenAI(
 
 # === ФУНКЦИЯ БРОСКА КУБИКА ===
 def roll_dice(sides=20, description="🎲 Бросок"):
-    """Анимированный бросок кубика"""
     result = random.randint(1, sides)
     dice_html = f"""
     <div style="text-align: center; padding: 10px; background: rgba(255,107,107,0.1); border-radius: 10px; margin: 10px 0;">
@@ -48,9 +45,8 @@ def roll_dice(sides=20, description="🎲 Бросок"):
     return result, dice_html
 
 
-# === ПАРСЕР БРОСКОВ КУБИКА ===
+# === ПАРСЕР БРОСКОВ ===
 def parse_dice_rolls(response_text):
-    """Ищет в ответе ИИ упоминания о бросках кубика"""
     dice_results = []
     patterns = [
         r'(?:бросок|кубик|d20)\s*[:]?\s*(\d{1,2})',
@@ -69,7 +65,6 @@ def parse_dice_rolls(response_text):
 
 # === ПАРСЕР ИНВЕНТАРЯ ===
 def parse_inventory_from_response(response_text, players):
-    """Ищет в ответе ИИ упоминания о добавлении предметов"""
     added_items = {}
     patterns = [
         r'получаешь\s+([^,!\.]+)\s*[\(!\.]',
@@ -101,7 +96,6 @@ def parse_inventory_from_response(response_text, players):
 
 # === ГЕНЕРАЦИЯ НАЧАЛЬНОГО ИНВЕНТАРЯ ===
 def generate_starting_inventory(history, race, char_class):
-    """Генерирует начальный инвентарь на основе истории персонажа"""
     try:
         response = client.chat.completions.create(
             model="openrouter/free",
@@ -125,11 +119,7 @@ def generate_starting_inventory(history, race, char_class):
         return ["рюкзак", "тетрадь", "ручка"]
 
 
-# === ИНИЦИАЛИЗАЦИЯ ТЕМЫ ===
-if "theme" not in st.session_state:
-    st.session_state.theme = "dark"
-
-# === ИНИЦИАЛИЗАЦИЯ СОСТОЯНИЯ ИГРЫ ===
+# === ГЛОБАЛЬНОЕ СОСТОЯНИЕ (общая комната) ===
 if "game_state" not in st.session_state:
     st.session_state.game_state = {
         "history": [{"role": "system", "content": """
@@ -138,7 +128,6 @@ if "game_state" not in st.session_state:
 **СВЯЩЕННОЕ ПРАВИЛО (НЕ НАРУШАТЬ):**
 - Ты НЕ изменяешь, НЕ дополняешь и НЕ переписываешь историю персонажа.
 - Ты начинаешь игру ТОЧНО ТАМ, ГДЕ находится персонаж по его истории.
-- Если игрок написал: "Я ученик 8 класса в школе" — он в ШКОЛЕ. Не в лаборатории, не в лесу, не в подземелье.
 - Ты НЕ добавляешь события, которых не было в истории.
 - Ты НЕ переносишь персонажа в другое место без его согласия.
 
@@ -163,220 +152,117 @@ if "game_state" not in st.session_state:
         "timer_start": None,
         "timer_duration": 60,
         "round_results": [],
-        "game_phase": "character_creation"
+        "game_phase": "waiting"  # waiting → character_creation → prologue → playing
     }
 
-if "player_name" not in st.session_state:
-    st.session_state.player_name = None
-if "player_history" not in st.session_state:
-    st.session_state.player_history = ""
-if "player_class" not in st.session_state:
-    st.session_state.player_class = ""
-if "player_race" not in st.session_state:
-    st.session_state.player_race = ""
-if "player_inventory" not in st.session_state:
-    st.session_state.player_inventory = []
+if "theme" not in st.session_state:
+    st.session_state.theme = "dark"
 
-# === НАСТРОЙКА СТРАНИЦЫ ===
+# === СТРАНИЦА ===
 st.set_page_config(page_title="🎲 D&D с ИИ", page_icon="🎲", layout="wide")
 
-# === CSS ДЛЯ ДВУХ ТЕМ ===
-if st.session_state.theme == "dark":
-    theme_css = """
-    <style>
-        .main { background-color: #0e1117; }
-        .stApp { background-color: #0e1117; }
-        .stApp, .stApp > header, .stApp > div { background-color: #0e1117; }
-        h1, h2, h3, h4, h5, h6, .stMarkdown, p, label, .stTextInput label, .stSelectbox label, .stTextArea label {
-            color: #e0e0e0 !important;
-        }
-        .stTextInput > div > div > input {
-            background-color: #1e1e2e !important;
-            color: #e0e0e0 !important;
-            border: 1px solid #3d3d5c !important;
-            border-radius: 8px !important;
-        }
-        .stTextArea > div > div > textarea {
-            background-color: #1e1e2e !important;
-            color: #e0e0e0 !important;
-            border: 1px solid #3d3d5c !important;
-            border-radius: 8px !important;
-        }
-        .stButton > button {
-            background-color: #ff6b6b !important;
-            color: white !important;
-            border-radius: 10px !important;
-            border: none !important;
-            transition: all 0.3s !important;
-        }
-        .stButton > button:hover {
-            background-color: #ff4757 !important;
-            transform: scale(1.02) !important;
-        }
-        .player-card {
-            background-color: #1e1e2e !important;
-            padding: 15px !important;
-            border-radius: 10px !important;
-            margin: 5px 0 !important;
-            border-left: 4px solid #ff6b6b !important;
-            color: #e0e0e0 !important;
-        }
-        .inventory-item {
-            background-color: #2d2d44 !important;
-            padding: 5px 10px !important;
-            border-radius: 5px !important;
-            margin: 3px 0 !important;
-            font-size: 14px !important;
-            color: #e0e0e0 !important;
-        }
-        .stSidebar {
-            background-color: #161621 !important;
-        }
-        .stSidebar .stMarkdown, .stSidebar p, .stSidebar label {
-            color: #e0e0e0 !important;
-        }
-        .hp-bar {
-            background-color: #2d2d44 !important;
-            border-radius: 10px !important;
-            height: 20px !important;
-            overflow: hidden !important;
-            margin: 5px 0 !important;
-        }
-        .hp-fill {
-            background: linear-gradient(90deg, #ff6b6b, #ff4757) !important;
-            height: 100% !important;
-            transition: width 0.5s !important;
-            border-radius: 10px !important;
-        }
-        .stChatMessage {
-            background-color: #1a1a2e !important;
-            border-radius: 10px !important;
-            padding: 10px !important;
-            margin: 5px 0 !important;
-            color: #e0e0e0 !important;
-        }
-        .timer-circle {
-            width: 80px !important;
-            height: 80px !important;
-            border-radius: 50% !important;
-            border: 4px solid #ff6b6b !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            font-size: 24px !important;
-            font-weight: bold !important;
-            color: #e0e0e0 !important;
-            margin: 0 auto !important;
-        }
-        .timer-warning {
-            border-color: #ff4757 !important;
-            animation: pulse 0.5s ease infinite !important;
-        }
-        @keyframes roll {
-            0% { transform: rotate(0deg) scale(1); }
-            25% { transform: rotate(90deg) scale(1.3); }
-            50% { transform: rotate(180deg) scale(0.7); }
-            75% { transform: rotate(270deg) scale(1.2); }
-            100% { transform: rotate(360deg) scale(1); }
-        }
-        @keyframes pulse {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.05); }
-            100% { transform: scale(1); }
-        }
-    </style>
-    """
-else:
-    theme_css = """
-    <style>
-        .main { background-color: #ffffff; }
-        .stApp { background-color: #ffffff; }
-        h1, h2, h3, h4, h5, h6, .stMarkdown, p, label {
-            color: #1a1a2e !important;
-        }
-        .stTextInput > div > div > input {
-            background-color: #f5f5f5 !important;
-            color: #1a1a2e !important;
-            border: 1px solid #d0d0d0 !important;
-            border-radius: 8px !important;
-        }
-        .stTextArea > div > div > textarea {
-            background-color: #f5f5f5 !important;
-            color: #1a1a2e !important;
-            border: 1px solid #d0d0d0 !important;
-            border-radius: 8px !important;
-        }
-        .stButton > button {
-            background-color: #ff6b6b !important;
-            color: white !important;
-            border-radius: 10px !important;
-            border: none !important;
-        }
-        .stButton > button:hover {
-            background-color: #ff4757 !important;
-        }
-        .player-card {
-            background-color: #f5f5f5 !important;
-            padding: 15px !important;
-            border-radius: 10px !important;
-            margin: 5px 0 !important;
-            border-left: 4px solid #ff6b6b !important;
-            color: #1a1a2e !important;
-        }
-        .inventory-item {
-            background-color: #e8e8e8 !important;
-            padding: 5px 10px !important;
-            border-radius: 5px !important;
-            margin: 3px 0 !important;
-            font-size: 14px !important;
-            color: #1a1a2e !important;
-        }
-        .stSidebar {
-            background-color: #f0f0f5 !important;
-        }
-        .stSidebar .stMarkdown, .stSidebar p, .stSidebar label {
-            color: #1a1a2e !important;
-        }
-        .hp-bar {
-            background-color: #e0e0e0 !important;
-            border-radius: 10px !important;
-            height: 20px !important;
-            overflow: hidden !important;
-            margin: 5px 0 !important;
-        }
-        .hp-fill {
-            background: linear-gradient(90deg, #ff6b6b, #ff4757) !important;
-            height: 100% !important;
-            transition: width 0.5s !important;
-            border-radius: 10px !important;
-        }
-        .stChatMessage {
-            background-color: #f5f5f5 !important;
-            border-radius: 10px !important;
-            padding: 10px !important;
-            margin: 5px 0 !important;
-            color: #1a1a2e !important;
-        }
-        .timer-circle {
-            width: 80px !important;
-            height: 80px !important;
-            border-radius: 50% !important;
-            border: 4px solid #ff6b6b !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            font-size: 24px !important;
-            font-weight: bold !important;
-            color: #1a1a2e !important;
-            margin: 0 auto !important;
-        }
-        .timer-warning {
-            border-color: #ff4757 !important;
-            animation: pulse 0.5s ease infinite !important;
-        }
-    </style>
-    """
-
+# === CSS ===
+theme_css = """
+<style>
+    .main { background-color: #0e1117; }
+    .stApp { background-color: #0e1117; }
+    h1, h2, h3, h4, h5, h6, .stMarkdown, p, label { color: #e0e0e0 !important; }
+    .stTextInput > div > div > input {
+        background-color: #1e1e2e !important;
+        color: #e0e0e0 !important;
+        border: 1px solid #3d3d5c !important;
+        border-radius: 8px !important;
+    }
+    .stTextArea > div > div > textarea {
+        background-color: #1e1e2e !important;
+        color: #e0e0e0 !important;
+        border: 1px solid #3d3d5c !important;
+        border-radius: 8px !important;
+    }
+    .stButton > button {
+        background-color: #ff6b6b !important;
+        color: white !important;
+        border-radius: 10px !important;
+        border: none !important;
+        transition: all 0.3s !important;
+    }
+    .stButton > button:hover {
+        background-color: #ff4757 !important;
+        transform: scale(1.02) !important;
+    }
+    .player-card {
+        background-color: #1e1e2e !important;
+        padding: 15px !important;
+        border-radius: 10px !important;
+        margin: 5px 0 !important;
+        border-left: 4px solid #ff6b6b !important;
+        color: #e0e0e0 !important;
+    }
+    .inventory-item {
+        background-color: #2d2d44 !important;
+        padding: 5px 10px !important;
+        border-radius: 5px !important;
+        margin: 3px 0 !important;
+        font-size: 14px !important;
+        color: #e0e0e0 !important;
+    }
+    .stSidebar { background-color: #161621 !important; }
+    .stSidebar .stMarkdown, .stSidebar p, .stSidebar label { color: #e0e0e0 !important; }
+    .hp-bar {
+        background-color: #2d2d44 !important;
+        border-radius: 10px !important;
+        height: 20px !important;
+        overflow: hidden !important;
+        margin: 5px 0 !important;
+    }
+    .hp-fill {
+        background: linear-gradient(90deg, #ff6b6b, #ff4757) !important;
+        height: 100% !important;
+        transition: width 0.5s !important;
+        border-radius: 10px !important;
+    }
+    .timer-circle {
+        width: 80px !important;
+        height: 80px !important;
+        border-radius: 50% !important;
+        border: 4px solid #ff6b6b !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-size: 24px !important;
+        font-weight: bold !important;
+        color: #e0e0e0 !important;
+        margin: 0 auto !important;
+    }
+    .timer-warning {
+        border-color: #ff4757 !important;
+        animation: pulse 0.5s ease infinite !important;
+    }
+    @keyframes roll {
+        0% { transform: rotate(0deg) scale(1); }
+        25% { transform: rotate(90deg) scale(1.3); }
+        50% { transform: rotate(180deg) scale(0.7); }
+        75% { transform: rotate(270deg) scale(1.2); }
+        100% { transform: rotate(360deg) scale(1); }
+    }
+    @keyframes pulse {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.05); }
+        100% { transform: scale(1); }
+    }
+    .ready-box {
+        background: rgba(255,107,107,0.15);
+        padding: 20px;
+        border-radius: 15px;
+        text-align: center;
+        margin: 20px 0;
+    }
+    .ready-count {
+        font-size: 48px;
+        color: #ff6b6b;
+    }
+</style>
+"""
 st.markdown(theme_css, unsafe_allow_html=True)
 
 # === ПЕРЕКЛЮЧАТЕЛЬ ТЕМЫ ===
@@ -387,152 +273,162 @@ with col_theme2:
         st.session_state.theme = "light" if st.session_state.theme == "dark" else "dark"
         st.rerun()
 
-# === ФАЗА 1: СОЗДАНИЕ ПЕРСОНАЖА ===
-if st.session_state.game_state["game_phase"] == "character_creation":
-    st.title("🎲 Создание персонажа")
+# === ФАЗА 0: ОЖИДАНИЕ ИГРОКОВ ===
+if st.session_state.game_state["game_phase"] == "waiting":
+    st.title("🎲 D&D с ИИ")
+    st.markdown("## 🎭 Ожидание игроков")
 
-    st.markdown("""
-    <div style="background: rgba(255,107,107,0.1); padding: 15px; border-radius: 10px; margin-bottom: 20px;">
-        <p style="color: #ff6b6b; margin: 0;">
-            💡 Ты можешь создать <b>любого</b> персонажа! Ковбой, киборг, эльф-маг, мутант-сталкер, 
-            ученик 8 класса — всё что угодно. Мир и правила подстроятся под твою историю.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    players = st.session_state.game_state["players"]
+
+    # Показываем список игроков
+    st.markdown("### 👥 Присоединившиеся игроки")
+    if players:
+        for name, data in players.items():
+            ready_status = "✅ Готов" if data.get("ready", False) else "⏳ Ожидает"
+            st.write(f"- {name} ({data.get('race', '')} {data.get('class', '')}) — {ready_status}")
+    else:
+        st.info("👤 Пока нет игроков. Создайте персонажа ниже!")
+
+    # === СОЗДАНИЕ ПЕРСОНАЖА ===
+    st.markdown("---")
+    st.markdown("### 📝 Создать персонажа")
 
     col1, col2 = st.columns(2)
-
     with col1:
-        st.markdown("### 👤 Основное")
-        name = st.text_input("Имя персонажа", value=st.session_state.player_name or "")
-        race = st.text_input(
-            "Раса (любая)",
-            value=st.session_state.player_race or "",
-            placeholder="Например: Ковбой, Киборг, Эльф, Мутант, Человек"
-        )
-        char_class = st.text_input(
-            "Класс (любой)",
-            value=st.session_state.player_class or "",
-            placeholder="Например: Стрелок, Хакер, Маг, Сталкер, Ученик"
-        )
-
+        name = st.text_input("Имя персонажа", placeholder="Введите имя")
+        race = st.text_input("Раса", placeholder="Например: Ковбой, Эльф, Киборг")
+        char_class = st.text_input("Класс", placeholder="Например: Стрелок, Маг, Хакер")
     with col2:
-        st.markdown("### 📜 История персонажа")
-        st.markdown("*Опиши прошлое своего героя. Это определит мир и сюжет.*")
-        history = st.text_area(
-            "История",
-            value=st.session_state.player_history or "",
-            placeholder="Пример: Я — ученик 8 класса в школе №43. Живу в Москве. У меня есть рюкзак, тетрадь и ручка.",
-            height=150
-        )
+        history = st.text_area("История персонажа", placeholder="Опишите прошлое вашего героя", height=150)
 
-    if st.button("🚀 Начать приключение!", type="primary", use_container_width=True):
-        if not name.strip():
-            st.error("❌ Введите имя персонажа!")
-        elif not race.strip():
-            st.error("❌ Введите расу!")
-        elif not char_class.strip():
-            st.error("❌ Введите класс!")
-        elif not history.strip():
-            st.error("❌ Напишите историю персонажа!")
+    if st.button("➕ Добавить персонажа", type="primary"):
+        if name and race and char_class and history:
+            if name not in players:
+                players[name] = {
+                    "action": "",
+                    "ready": False,
+                    "hp": 20,
+                    "max_hp": 20,
+                    "race": race,
+                    "class": char_class,
+                    "inventory": [],
+                    "level": 1,
+                    "exp": 0,
+                    "history": history
+                }
+                st.rerun()
+            else:
+                st.error("Имя уже занято!")
         else:
-            st.session_state.player_name = name
-            st.session_state.player_race = race
-            st.session_state.player_class = char_class
-            st.session_state.player_history = history
+            st.error("Заполните все поля!")
 
-            st.session_state.game_state["players"][name] = {
-                "action": "",
-                "ready": False,
-                "hp": 20,
-                "max_hp": 20,
-                "race": race,
-                "class": char_class,
-                "inventory": [],
-                "level": 1,
-                "exp": 0
-            }
+    # === КНОПКА "ГОТОВ" ===
+    st.markdown("---")
 
-            st.session_state.game_state["game_phase"] = "prologue"
-            st.rerun()
+    # Находим текущего игрока (по имени)
+    # Для простоты используем st.session_state для хранения имени текущего игрока
+    if "current_player_name" not in st.session_state:
+        st.session_state.current_player_name = None
 
-    st.stop()
+    # Выбор своего имени
+    if players:
+        player_names = list(players.keys())
+        current_name = st.selectbox("Выберите своего персонажа", player_names, key="player_select")
+        st.session_state.current_player_name = current_name
 
-# === ФАЗА 2: ПРОЛОГ + ГЕНЕРАЦИЯ ИНВЕНТАРЯ ===
-if st.session_state.game_state["game_phase"] == "prologue":
-    with st.spinner("🎲 Генерация мира и инвентаря..."):
-        try:
-            # Генерируем инвентарь для каждого игрока
-            for name, data in st.session_state.game_state["players"].items():
-                if "inventory" not in data or not data["inventory"]:
-                    history = st.session_state.player_history if name == st.session_state.player_name else "Нет истории"
-                    inv = generate_starting_inventory(history, data.get("race", ""), data.get("class", ""))
-                    data["inventory"] = inv
+        # Кнопка "Готов"
+        if current_name:
+            is_ready = players[current_name].get("ready", False)
+            if not is_ready:
+                if st.button("✅ Я готов!", type="primary", use_container_width=True):
+                    players[current_name]["ready"] = True
+                    st.rerun()
+            else:
+                st.success("✅ Вы готовы! Ожидаем остальных...")
 
-            # Генерируем пролог
-            players_info = []
-            for name, data in st.session_state.game_state["players"].items():
-                history = st.session_state.player_history if name == st.session_state.player_name else "Нет истории"
-                players_info.append(f"{name} ({data['race']}, {data['class']}): {history}")
+        # Проверяем, все ли готовы
+        all_ready = all(p.get("ready", False) for p in players.values())
+        if len(players) >= 1 and all_ready:
+            st.success("🎉 Все игроки готовы!")
+            if st.button("🚀 Начать игру!", type="primary", use_container_width=True):
+                # Генерируем инвентарь и пролог
+                with st.spinner("🎲 Генерация мира..."):
+                    for name, data in players.items():
+                        if not data["inventory"]:
+                            data["inventory"] = generate_starting_inventory(
+                                data.get("history", ""),
+                                data.get("race", ""),
+                                data.get("class", "")
+                            )
 
-            system_prompt = st.session_state.game_state["history"][0]["content"]
+                    # Генерируем пролог
+                    players_info = []
+                    for name, data in players.items():
+                        players_info.append(f"{name} ({data['race']}, {data['class']}): {data.get('history', '')}")
 
-            prologue_response = client.chat.completions.create(
-                model="openrouter/free",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"""
+                    system_prompt = st.session_state.game_state["history"][0]["content"]
+
+                    try:
+                        prologue_response = client.chat.completions.create(
+                            model="openrouter/free",
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": f"""
 Создай пролог для игры. Учитывай следующие истории персонажей:
 
 {chr(10).join(players_info)}
 
 **ВАЖНЕЙШЕЕ ПРАВИЛО:**
-- Начни игру ТАМ, ГДЕ находится персонаж по его истории.
-- НЕ изменяй историю персонажа. Ты только продолжаешь её.
-- Если персонаж ученик в школе — он в ШКОЛЕ. Не придумывай лабораторию, подземелье или лес.
-- Добавь ПРОСТОЕ событие в этом месте (например, странный звук за дверью, учитель входит в класс, звонок на урок).
+- Начни игру ТАМ, ГДЕ находится каждый персонаж по его истории.
+- НЕ изменяй историю персонажей. Ты только продолжаешь её.
+- Объедини всех персонажей в одном месте и одной ситуации.
 
-Напиши краткое вступление (3-4 предложения) и задай вопрос: "Что ты делаешь?"
+Напиши краткое вступление (3-4 предложения) и задай вопрос: "Что вы делаете?"
 """}
-                ]
-            )
+                            ]
+                        )
+                        prologue_text = prologue_response.choices[0].message.content
+                        st.session_state.game_state["round_results"].append(f"📜 **Пролог**\n\n{prologue_text}")
+                        st.session_state.game_state["history"].append({"role": "assistant", "content": prologue_text})
+                    except Exception as e:
+                        st.error(f"Ошибка генерации пролога: {e}")
+                        st.session_state.game_state["round_results"].append(
+                            "📜 **Пролог**\n\nВы стоите на перекрёстке судеб. Каждый из вас пришёл сюда со своей историей. Впереди вас ждёт неизведанный мир. Что вы делаете?"
+                        )
 
-            prologue_text = prologue_response.choices[0].message.content
-
-            if prologue_text and prologue_text.strip():
-                st.session_state.game_state["round_results"].append(f"📜 **Пролог**\n\n{prologue_text}")
-                st.session_state.game_state["history"].append({"role": "assistant", "content": prologue_text})
-                st.session_state.game_state["game_phase"] = "playing"
-                st.rerun()
-            else:
-                raise ValueError("Пустой ответ от ИИ")
-
-        except Exception as e:
-            st.error(f"Ошибка генерации пролога: {e}")
-            st.session_state.game_state["round_results"].append(
-                "📜 **Пролог**\n\nТы сидишь на уроке. За окном обычный день. Что ты делаешь?"
-            )
-            st.session_state.game_state["game_phase"] = "playing"
-            st.rerun()
+                    st.session_state.game_state["game_phase"] = "playing"
+                    st.rerun()
+    else:
+        st.info("Добавьте первого персонажа!")
 
     st.stop()
 
-# === ОСНОВНАЯ ИГРА ===
+# === ИГРОВАЯ ФАЗА ===
 st.title(f"🎲 Раунд {st.session_state.game_state['round_number']}")
 
-# === ЛЕВАЯ ПАНЕЛЬ: Характеристики персонажа ===
+# === ЛЕВАЯ ПАНЕЛЬ ===
 with st.sidebar:
-    st.markdown("### 👤 Мой персонаж")
+    players = st.session_state.game_state["players"]
 
-    player_data = st.session_state.game_state["players"].get(st.session_state.player_name, {})
+    # Выбор текущего игрока (для отображения его характеристик)
+    if "current_player_name" not in st.session_state or st.session_state.current_player_name not in players:
+        if players:
+            st.session_state.current_player_name = list(players.keys())[0]
+        else:
+            st.session_state.current_player_name = None
 
-    if player_data:
+    current_name = st.session_state.current_player_name
+
+    if current_name and current_name in players:
+        player_data = players[current_name]
+
+        st.markdown("### 👤 Мой персонаж")
+        st.markdown(f"**{current_name}**")
+        st.markdown(f"*{player_data.get('race', 'Человек')} {player_data.get('class', 'Воин')}*")
+
         hp = player_data.get("hp", 20)
         max_hp = player_data.get("max_hp", 20)
         hp_percent = (hp / max_hp) * 100
-
-        st.markdown(f"**{st.session_state.player_name}**")
-        st.markdown(f"*{player_data.get('race', 'Человек')} {player_data.get('class', 'Воин')}*")
 
         st.markdown(f"**❤️ HP:** {hp}/{max_hp}")
         st.markdown(f"""
@@ -555,21 +451,20 @@ with st.sidebar:
         st.divider()
         st.caption(f"Раунд {st.session_state.game_state['round_number']}")
 
-        # === КНОПКА НОВАЯ ИГРА ===
+        # Кнопка новой игры (только для админа)
         if st.button("🔄 Новая игра (сброс)", type="secondary"):
             st.session_state.game_state["history"] = [st.session_state.game_state["history"][0]]
             st.session_state.game_state["round_results"] = []
             st.session_state.game_state["round_number"] = 1
             st.session_state.game_state["players"] = {}
-            st.session_state.player_name = None
-            st.session_state.game_state["game_phase"] = "character_creation"
+            st.session_state.game_state["game_phase"] = "waiting"
+            st.session_state.current_player_name = None
             st.rerun()
 
-# === ПРАВАЯ ПАНЕЛЬ: Все игроки ===
-with st.sidebar:
+    # === СПИСОК ВСЕХ ИГРОКОВ ===
     st.markdown("### 👥 Все игроки")
-    for name, data in st.session_state.game_state["players"].items():
-        if name != st.session_state.player_name:
+    for name, data in players.items():
+        if name != current_name:
             hp = data.get("hp", 20)
             max_hp = data.get("max_hp", 20)
             status = "✅ Готов" if data.get("ready", False) else "✏️ Пишет..."
@@ -581,9 +476,9 @@ with st.sidebar:
             """, unsafe_allow_html=True)
 
     if st.button("⚔️ Завершить раунд (админ)"):
-        for name in st.session_state.game_state["players"]:
-            if not st.session_state.game_state["players"][name]["ready"]:
-                st.session_state.game_state["players"][name]["ready"] = True
+        for name in players:
+            if not players[name]["ready"]:
+                players[name]["ready"] = True
         st.rerun()
 
 # === ОТОБРАЖЕНИЕ ИСТОРИИ ===
@@ -591,10 +486,19 @@ for msg in st.session_state.game_state["round_results"]:
     with st.chat_message("assistant"):
         st.markdown(msg)
 
-# === ВВОД ДЕЙСТВИЯ ===
+# === ИГРОВАЯ ЛОГИКА ===
 if st.session_state.game_state["game_phase"] == "playing":
-    current_player = st.session_state.game_state["players"][st.session_state.player_name]
     players = st.session_state.game_state["players"]
+
+    if not players:
+        st.warning("Нет игроков! Что-то пошло не так.")
+        st.stop()
+
+    # Определяем текущего игрока
+    if "current_player_name" not in st.session_state or st.session_state.current_player_name not in players:
+        st.session_state.current_player_name = list(players.keys())[0]
+
+    current_player = players[st.session_state.current_player_name]
 
     if current_player["ready"]:
         st.info("✅ Вы уже отправили действие. Ждём остальных...")
@@ -717,7 +621,7 @@ if st.session_state.game_state["game_phase"] == "playing":
                         response_placeholder.markdown(
                             f"🎯 **Раунд {st.session_state.game_state['round_number']}**\n\n{full_response}▌")
 
-                # === ПАРСИНГ БРОСКОВ КУБИКА ===
+                # === ПАРСИНГ БРОСКОВ ===
                 dice_results = parse_dice_rolls(full_response)
                 if dice_results:
                     dice_html = ""
@@ -751,12 +655,10 @@ if st.session_state.game_state["game_phase"] == "playing":
                                 players[name]["inventory"].append(item)
                                 st.success(f"📦 {name} получил: {item}")
 
-                # Отображаем финальный ответ
                 response_placeholder.markdown(
                     f"🎯 **Раунд {st.session_state.game_state['round_number']}**\n\n{full_response}")
                 status_placeholder.empty()
 
-                # Сохраняем в историю (убираем HTML-теги)
                 clean_response = re.sub(r'<[^>]+>', '', full_response)
                 st.session_state.game_state["round_results"].append(
                     f"🎯 **Раунд {st.session_state.game_state['round_number']}**\n\n{clean_response}"
